@@ -47,7 +47,9 @@ public final class BannerClient: @unchecked Sendable {
         ]
         guard let url = comps.url else { throw BannerError.invalidURL }
 
-        let (data, response) = try await session.data(from: url)
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 15
+        let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw BannerError.notHTTP }
         guard http.statusCode == 200 else { throw BannerError.httpStatus(http.statusCode) }
         return try JSONDecoder().decode(EmbedPayload.self, from: data)

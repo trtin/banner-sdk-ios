@@ -1,4 +1,11 @@
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+typealias PlatformImage = UIImage
+#elseif canImport(AppKit)
+import AppKit
+typealias PlatformImage = NSImage
+#endif
 
 /// Drop-in SwiftUI banner. Resolves `site`/`placement` against the backend embed API
 /// and renders the returned template natively. Equivalent of the web SDK's
@@ -19,16 +26,29 @@ public struct BannerView: View {
     private let showArrows: Bool
     /// Show the slide-position dots on carousels (JS SDK `dots`; default on).
     private let showDots: Bool
+    /// Explicit content aspect ratio (width/height). When nil the SDK measures each
+    /// image's natural ratio. Used to size the carousel and reserve space before load.
+    private let aspectRatio: CGFloat?
+    /// Crop grid cells to fill uniform tiles (vs. fit each image with no crop, default).
+    private let gridCropsToFill: Bool
+    /// Columns to use at compact width (phone portrait). `nil` keeps the payload's
+    /// `columns` (no collapse). Default `1` mirrors the web SDK's <640px behavior.
+    private let compactGridColumns: Int?
 
     @State private var payload: EmbedPayload?
     @State private var didTrackImpressions = false
     @State private var selection = 0
     /// Bumped on manual navigation to restart the auto-advance interval.
     @State private var resetEpoch = 0
+    /// First slide's measured aspect ratio, used to self-size the carousel.
+    @State private var measuredRatio: CGFloat?
     @Environment(\.openURL) private var openURL
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var hSizeClass
     #endif
+
+    /// Neutral fallback used to reserve space before an image's true ratio is known.
+    private static let fallbackRatio: CGFloat = 16.0 / 9.0
 
     public init(
         site: String,
@@ -36,7 +56,10 @@ public struct BannerView: View {
         client: BannerClient,
         autoAdvance: TimeInterval? = 5,
         showArrows: Bool = false,
-        showDots: Bool = true
+        showDots: Bool = true,
+        aspectRatio: CGFloat? = nil,
+        gridCropsToFill: Bool = false,
+        compactGridColumns: Int? = 1
     ) {
         self.site = site
         self.placement = placement
@@ -44,6 +67,9 @@ public struct BannerView: View {
         self.autoAdvance = autoAdvance
         self.showArrows = showArrows
         self.showDots = showDots
+        self.aspectRatio = aspectRatio
+        self.gridCropsToFill = gridCropsToFill
+        self.compactGridColumns = compactGridColumns
     }
 
     public var body: some View {
@@ -72,11 +98,19 @@ public struct BannerView: View {
     @ViewBuilder
     private func carousel(_ payload: EmbedPayload, template: BannerTemplate) -> some View {
         let slides = payload.slides
+        // A bare TabView has no intrinsic height inside a ScrollView and collapses, so
+        // give it a definite height from the (host-supplied or measured) aspect ratio.
+        let carouselRatio = aspectRatio ?? measuredRatio ?? Self.fallbackRatio
         ZStack {
             TabView(selection: $selection) {
                 ForEach(slides.indices, id: \.self) { index in
-                    slideView(slides[index], template: template, columns: payload.columns)
-                        .tag(index)
+                    slideView(
+                        slides[index],
+                        template: template,
+                        columns: payload.columns,
+                        onRatio: index == 0 ? { measuredRatio = $0 } : nil
+                    )
+                    .tag(index)
                 }
             }
             // Dots are drawn manually below (tappable, toggleable) — mirror the JS SDK,
@@ -84,6 +118,7 @@ public struct BannerView: View {
             #if os(iOS)
             .tabViewStyle(.page(indexDisplayMode: .never))
             #endif
+            .aspectRatio(carouselRatio, contentMode: .fit)
 
             if showArrows && slides.count > 1 {
                 HStack {
@@ -151,21 +186,31 @@ public struct BannerView: View {
     // MARK: - Per-template rendering
 
     @ViewBuilder
-    private func slideView(_ slide: EmbedSlide, template: BannerTemplate, columns: Int?) -> some View {
+    private func slideView(
+        _ slide: EmbedSlide,
+        template: BannerTemplate,
+        columns: Int?,
+        onRatio: ((CGFloat) -> Void)? = nil
+    ) -> some View {
         switch template {
         case .grid:
             gridSlide(slide, columns: columns ?? 2)
         case .strip:
             stripSlide(slide)
         case .hero, .slideshow:
-            heroSlide(slide)
+            heroSlide(slide, onRatio: onRatio)
         }
     }
 
     @ViewBuilder
-    private func heroSlide(_ slide: EmbedSlide) -> some View {
+    private func heroSlide(_ slide: EmbedSlide, onRatio: ((CGFloat) -> Void)? = nil) -> some View {
         tappable(ctaURL: slide.ctaURL, bannerId: slide.id) {
-            RemoteImage(url: slide.imageURL, accessibilityLabel: slide.altText)
+            RemoteImage(
+                url: slide.imageURL,
+                accessibilityLabel: slide.altText,
+                placeholderRatio: aspectRatio ?? Self.fallbackRatio,
+                onRatio: onRatio
+            )
         }
     }
 
@@ -173,21 +218,30 @@ public struct BannerView: View {
     private func gridSlide(_ slide: EmbedSlide, columns: Int) -> some View {
         let cells = slide.images ?? []
         let layout = Array(repeating: GridItem(.flexible(), spacing: 8), count: max(1, effectiveColumns(columns)))
+        // When cropping to uniform tiles we need a fixed box ratio; otherwise fit each
+        // image at its natural ratio (the cell still reserves space, so no collapse).
+        let fill = gridCropsToFill ? (aspectRatio ?? 1200.0 / 762.0) : nil
         LazyVGrid(columns: layout, spacing: 8) {
             ForEach(cells.indices, id: \.self) { index in
                 let cell = cells[index]
                 tappable(ctaURL: cell.ctaURL, bannerId: slide.id) {
-                    RemoteImage(url: cell.imageURL, accessibilityLabel: cell.altText)
+                    RemoteImage(
+                        url: cell.imageURL,
+                        accessibilityLabel: cell.altText,
+                        fillRatio: fill,
+                        placeholderRatio: aspectRatio ?? Self.fallbackRatio
+                    )
                 }
             }
         }
     }
 
-    /// JS SDK collapses the grid to a single column under 640px. On iOS the compact
-    /// horizontal size class (phone portrait, slide-over) is the native equivalent.
+    /// The web SDK collapses the grid to one column under 640px. On iOS the compact
+    /// horizontal size class (phone portrait, slide-over) is the native equivalent;
+    /// `compactGridColumns` lets the host override how many columns to keep.
     private func effectiveColumns(_ columns: Int) -> Int {
         #if os(iOS)
-        if hSizeClass == .compact { return 1 }
+        if hSizeClass == .compact { return compactGridColumns ?? columns }
         #endif
         return columns
     }
@@ -246,23 +300,70 @@ public struct BannerView: View {
     }
 }
 
-/// Async image with a neutral placeholder while loading.
+/// Remote image that reserves layout space deterministically so it never collapses
+/// inside a `LazyVGrid` or `TabView`.
+///
+/// Unlike `AsyncImage` (iOS 15), this loads via `URLSession` so it can read the
+/// decoded image's true pixel ratio and size the cell with no crop and no reflow.
+/// - `fillRatio`: when set, crop-to-fill a fixed-ratio box (uniform tiles).
+/// - `placeholderRatio`: ratio used to reserve space before the image loads.
+/// - `onRatio`: reports the measured natural ratio once (used to self-size carousels).
 @available(iOS 15.0, macOS 12.0, *)
 struct RemoteImage: View {
     let url: URL?
     var accessibilityLabel: String?
+    var fillRatio: CGFloat?
+    var placeholderRatio: CGFloat = 16.0 / 9.0
+    var onRatio: ((CGFloat) -> Void)?
+
+    @State private var image: Image?
+    @State private var naturalRatio: CGFloat?
 
     var body: some View {
-        AsyncImage(url: url) { phase in
-            switch phase {
-            case .success(let image):
-                image.resizable().scaledToFit()
-            case .failure:
-                Color.clear.frame(height: 0)
-            default:
-                Rectangle().fill(Color.gray.opacity(0.1))
+        Group {
+            if let image {
+                if let fillRatio {
+                    Color.clear
+                        .aspectRatio(fillRatio, contentMode: .fit)
+                        .overlay(image.resizable().aspectRatio(contentMode: .fill))
+                        .clipped()
+                        .contentShape(Rectangle())
+                } else {
+                    image.resizable()
+                        .aspectRatio(naturalRatio ?? placeholderRatio, contentMode: .fit)
+                }
+            } else {
+                // Loading or failed: a neutral box that reserves the cell's space so a
+                // grid stays even (a 404 cell doesn't silently collapse) and a carousel
+                // doesn't shrink to nothing before load.
+                Rectangle()
+                    .fill(Color.gray.opacity(0.12))
+                    .aspectRatio(fillRatio ?? placeholderRatio, contentMode: .fit)
             }
         }
         .accessibilityLabel(accessibilityLabel ?? "")
+        .task(id: url) { await load() }
+    }
+
+    private func load() async {
+        image = nil
+        guard let url else { return }
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            guard let platform = PlatformImage(data: data) else { return }
+            let size = platform.size
+            if size.width > 0, size.height > 0 {
+                let ratio = size.width / size.height
+                naturalRatio = ratio
+                onRatio?(ratio)
+            }
+            #if canImport(UIKit)
+            image = Image(uiImage: platform)
+            #elseif canImport(AppKit)
+            image = Image(nsImage: platform)
+            #endif
+        } catch {
+            // Leave `image` nil → the neutral placeholder above keeps layout stable.
+        }
     }
 }

@@ -12,8 +12,8 @@ import BannerSDK
 private enum Demo {
     static let host = "https://api-mm.xui.com.au"
 
-    static var site: String { CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "demo" }
-    static var placement: String { CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : "home-hero" }
+    static var site: String { CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "wsbscomau" }
+    static var placement: String { CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : "heroslideshow" }
 }
 
 @main

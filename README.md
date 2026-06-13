@@ -16,7 +16,7 @@ iOS 15+ / macOS 12+ (uses `AsyncImage` and `.task`).
 ## Install (Swift Package Manager)
 
 ```swift
-.package(url: "https://github.com/trtin/banner-sdk-ios.git", from: "0.1.1")
+.package(url: "https://github.com/trtin/banner-sdk-ios.git", from: "0.1.2")
 ```
 
 Then add the `BannerSDK` product to your target. Or point Xcode at this `ios-sdk/`
@@ -71,7 +71,10 @@ public struct BannerView: View {
         client: BannerClient,    // shared client (holds baseURL + visitor id)
         autoAdvance: TimeInterval? = 5,  // carousel interval in seconds; nil disables
         showArrows: Bool = false,        // prev/next arrows on carousels (JS `arrows`)
-        showDots: Bool = true            // slide-position dots on carousels (JS `dots`)
+        showDots: Bool = true,           // slide-position dots on carousels (JS `dots`)
+        aspectRatio: CGFloat? = nil,     // content width/height; nil = measure each image
+        gridCropsToFill: Bool = false,   // grid: crop to uniform tiles vs. fit (no crop)
+        compactGridColumns: Int? = 1     // grid columns on phone width; nil = no collapse
     )
 }
 ```
@@ -80,9 +83,20 @@ Behavior: resolves on appear (and whenever `site`/`placement` change), tracks on
 `impression` per returned slide, renders the template, and on tap tracks a `click` +
 opens the CTA URL. A failed/empty resolve renders nothing — the host UI is never broken.
 
+Sizing: images load via `URLSession` so the view knows each image's true pixel ratio
+and **reserves layout space deterministically** — grids don't collapse before load, and
+the carousel self-sizes to the first slide's ratio (a bare `TabView` has no intrinsic
+height in a `ScrollView`). Pass `aspectRatio` to fix the size explicitly and skip the
+one-frame reflow on first load.
+
 ```swift
-BannerView(site: "acme", placement: "promo",
+BannerView(site: "wsbscomau", placement: "heroslideshow",
            client: client, autoAdvance: 7, showArrows: true, showDots: true)
+
+// Grid that keeps 2 columns on phones and crops to uniform tiles:
+BannerView(site: "wsbscomau", placement: "home-whats-new",
+           client: client, compactGridColumns: 2, gridCropsToFill: true,
+           aspectRatio: 1200.0/762.0)
 ```
 
 ### `BannerClient` — networking + tracking
@@ -165,6 +179,18 @@ Intentional differences:
   the web's 640px breakpoint.
 - **No hover-pause** (touch platform); **no WKWebView** — the embed API returns
   structured data + image URLs only, so banners render fully native.
+
+## Changelog
+
+- **0.1.2** — Fixed grid cells collapsing before images load and the carousel having no
+  height in a `ScrollView`. `RemoteImage` now loads via `URLSession`, measures the true
+  pixel ratio, reserves space, and shows a neutral placeholder on a failed cell (so a
+  404 doesn't drop a tile). Added `aspectRatio`, `gridCropsToFill`, and
+  `compactGridColumns`. Added a 15s resolve timeout. All additions are defaulted — no
+  breaking changes.
+- **0.1.1** — Carousel arrows (`showArrows`) and dot toggle (`showDots`), tappable dots,
+  interaction-resets-timer, grid 1-column collapse on compact width.
+- **0.1.0** — Initial release: hero/grid/strip/slideshow, tracking, visitor id.
 
 ## Runnable demo
 
