@@ -103,3 +103,22 @@ cd ios-sdk
 swift build
 swift test
 ```
+
+## Publishing (canonical source vs. consumer repo)
+
+This directory (`imgcode/ios-sdk`) is the **canonical source** — edit the SDK here.
+Consumers depend on the standalone mirror repo (SwiftPM requires `Package.swift` at a
+repo root, which a monorepo subdirectory can't provide):
+
+> https://github.com/trtin/banner-sdk-ios
+
+`publish.sh` mirrors this directory into that repo. Its `main` always reflects
+`ios-sdk/` as of the last publish; consumers pin to tags.
+
+```bash
+./publish.sh          # build + test, then sync & push main
+./publish.sh 0.1.1    # ...and also tag/push release 0.1.1
+```
+
+After making changes here, run `./publish.sh <version>` to cut a new release that
+consuming apps can bump to.
