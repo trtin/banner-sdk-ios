@@ -16,10 +16,11 @@ iOS 15+ / macOS 12+ (uses `AsyncImage` and `.task`).
 ## Install (Swift Package Manager)
 
 ```swift
-.package(url: "https://github.com/your-org/imgcode-banner-ios.git", from: "0.1.0")
+.package(url: "https://github.com/trtin/banner-sdk-ios.git", from: "0.1.1")
 ```
 
-or point Xcode at this `ios-sdk/` directory directly.
+Then add the `BannerSDK` product to your target. Or point Xcode at this `ios-sdk/`
+directory directly for local development.
 
 ## Usage
 
@@ -48,38 +49,122 @@ nothing — the host UI is never disrupted.
 | Template    | Rendering |
 |-------------|-----------|
 | `hero`      | Single `AsyncImage`, mobile image preferred |
-| `slideshow` | Paged `TabView` carousel with auto-advance (configurable) |
-| `grid`      | `LazyVGrid` of `images[]`, `columns` from payload |
+| `slideshow` | Paged `TabView` carousel with auto-advance + dots/arrows |
+| `grid`      | `LazyVGrid` of `images[]`, `columns` from payload; collapses to 1 column on compact width |
 | `strip`     | Colored bar with `text`, parsed `bgColor`/`textColor`/`height` |
 
 Multiple resolved banners (or the `slideshow` template) render as a carousel; a single
 non-slideshow banner renders statically — matching the web SDK's logic.
 
-### Options
+## Public API reference
+
+Everything below is `public`. Module: `import BannerSDK`.
+
+### `BannerView` — SwiftUI view (drop-in)
 
 ```swift
-BannerView(site: "acme", placement: "promo", client: client, autoAdvance: 7) // seconds; nil disables
+@available(iOS 15.0, macOS 12.0, *)
+public struct BannerView: View {
+    public init(
+        site: String,            // banner `site` key
+        placement: String,       // banner `placement` key
+        client: BannerClient,    // shared client (holds baseURL + visitor id)
+        autoAdvance: TimeInterval? = 5,  // carousel interval in seconds; nil disables
+        showArrows: Bool = false,        // prev/next arrows on carousels (JS `arrows`)
+        showDots: Bool = true            // slide-position dots on carousels (JS `dots`)
+    )
+}
 ```
 
-### Lower-level client
+Behavior: resolves on appear (and whenever `site`/`placement` change), tracks one
+`impression` per returned slide, renders the template, and on tap tracks a `click` +
+opens the CTA URL. A failed/empty resolve renders nothing — the host UI is never broken.
 
 ```swift
+BannerView(site: "acme", placement: "promo",
+           client: client, autoAdvance: 7, showArrows: true, showDots: true)
+```
+
+### `BannerClient` — networking + tracking
+
+```swift
+public final class BannerClient {
+    // baseURL must be the embed root, e.g. https://host/api/embed
+    public init(baseURL: URL, session: URLSession = .shared)
+    // convenience: pass a host like "https://host"; appends "/api/embed"
+    public convenience init?(host: String, session: URLSession = .shared)
+
+    public let visitorId: String   // stable per-install UUID (UserDefaults "bnr_vid")
+
+    public func resolve(site: String, placement: String) async throws -> EmbedPayload
+    public func track(bannerId: String, event: TrackEvent)   // fire-and-forget
+}
+
+public enum TrackEvent: String { case impression, click }
+public enum BannerError: Error { case invalidURL, notHTTP, httpStatus(Int) }
+```
+
+```swift
+let client = BannerClient(host: "https://api-mm.xui.com.au")!
 let payload = try await client.resolve(site: "acme", placement: "home-hero")
 client.track(bannerId: payload.slides[0].id, event: .click)
 ```
 
-The per-install visitor id (`client.visitorId`) is a UUID persisted in `UserDefaults`
-under `bnr_vid`, mirroring the web SDK's `localStorage` key.
+### Models (`Codable`, mirror the backend `EmbedPayload`)
 
-## Notes / parity caveats
+```swift
+public struct EmbedPayload: Codable, Sendable {
+    public let template: String     // "hero" | "grid" | "strip" | "slideshow"
+    public let columns: Int?        // grid only
+    public let slides: [EmbedSlide]
+}
+
+public struct EmbedSlide: Codable, Sendable {
+    public let id: String           // NOT unique: slideshow expands to repeated ids
+    public let desktopImage: String?
+    public let mobileImage: String?
+    public let ctaUrl: String?
+    public let altText: String?
+    public let images: [GridImage]? // grid
+    public let text: String?        // strip
+    public let bgColor: String?     // strip
+    public let textColor: String?   // strip
+    public let height: String?      // strip (e.g. "48px")
+    public var preferredImage: String?  // mobileImage ?? desktopImage
+    public var imageURL: URL?
+    public var ctaURL: URL?
+}
+
+public struct GridImage: Codable, Sendable {
+    public let desktop: String
+    public let mobile: String?
+    public let ctaUrl: String?
+    public let altText: String?
+    public var preferredImage: String   // mobile ?? desktop
+    public var imageURL: URL?
+    public var ctaURL: URL?
+}
+
+public enum BannerTemplate: String { case hero, grid, strip, slideshow }
+```
+
+## Notes / parity with the JS SDK
+
+Covered: all four templates, single-vs-carousel logic, auto-advance + interval,
+tappable dots, prev/next arrows, `arrows`/`dots` toggles, grid 1-column collapse on
+narrow screens, impression/click tracking, and the persisted visitor id.
+
+Intentional differences:
 
 - **Shared slide ids**: the backend expands one `slideshow` banner's `images[]` into
   several slides that all carry the same `id`. The SDK renders by index and tracks by
   `id`, so impressions for an expanded slideshow are counted per image (same as web).
 - **Mobile-first images**: phones always get `mobileImage ?? desktopImage`; there is no
   desktop/mobile media-query swap like the web CSS.
-- **No WKWebView**: the embed API returns structured data + image URLs only, so banners
-  render fully native.
+- **Grid collapse** uses the compact horizontal size class as the native equivalent of
+  the web's 640px breakpoint.
+- **No hover-pause** (touch platform); **no WKWebView** — the embed API returns
+  structured data + image URLs only, so banners render fully native.
 
 ## Runnable demo
 

@@ -1,4 +1,3 @@
-import Combine
 import SwiftUI
 
 /// Drop-in SwiftUI banner. Resolves `site`/`placement` against the backend embed API
@@ -16,22 +15,35 @@ public struct BannerView: View {
     private let client: BannerClient
     /// Auto-advance interval for carousels, in seconds. `nil` disables auto-advance.
     private let autoAdvance: TimeInterval?
+    /// Show prev/next arrows on carousels (JS SDK `arrows`; default off).
+    private let showArrows: Bool
+    /// Show the slide-position dots on carousels (JS SDK `dots`; default on).
+    private let showDots: Bool
 
     @State private var payload: EmbedPayload?
     @State private var didTrackImpressions = false
     @State private var selection = 0
+    /// Bumped on manual navigation to restart the auto-advance interval.
+    @State private var resetEpoch = 0
     @Environment(\.openURL) private var openURL
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var hSizeClass
+    #endif
 
     public init(
         site: String,
         placement: String,
         client: BannerClient,
-        autoAdvance: TimeInterval? = 5
+        autoAdvance: TimeInterval? = 5,
+        showArrows: Bool = false,
+        showDots: Bool = true
     ) {
         self.site = site
         self.placement = placement
         self.client = client
         self.autoAdvance = autoAdvance
+        self.showArrows = showArrows
+        self.showDots = showDots
     }
 
     public var body: some View {
@@ -60,26 +72,80 @@ public struct BannerView: View {
     @ViewBuilder
     private func carousel(_ payload: EmbedPayload, template: BannerTemplate) -> some View {
         let slides = payload.slides
-        TabView(selection: $selection) {
-            ForEach(slides.indices, id: \.self) { index in
-                slideView(slides[index], template: template, columns: payload.columns)
-                    .tag(index)
+        ZStack {
+            TabView(selection: $selection) {
+                ForEach(slides.indices, id: \.self) { index in
+                    slideView(slides[index], template: template, columns: payload.columns)
+                        .tag(index)
+                }
+            }
+            // Dots are drawn manually below (tappable, toggleable) — mirror the JS SDK,
+            // so the built-in page indicator is disabled.
+            #if os(iOS)
+            .tabViewStyle(.page(indexDisplayMode: .never))
+            #endif
+
+            if showArrows && slides.count > 1 {
+                HStack {
+                    arrowButton("chevron.left") { go(to: selection - 1, count: slides.count) }
+                    Spacer()
+                    arrowButton("chevron.right") { go(to: selection + 1, count: slides.count) }
+                }
+                .padding(.horizontal, 8)
+            }
+
+            if showDots && slides.count > 1 {
+                VStack {
+                    Spacer()
+                    dotsBar(count: slides.count)
+                }
             }
         }
-        #if os(iOS)
-        .tabViewStyle(.page(indexDisplayMode: slides.count > 1 ? .automatic : .never))
-        #endif
-        .onReceive(advanceTimer) { _ in
-            guard slides.count > 1 else { return }
-            withAnimation { selection = (selection + 1) % slides.count }
+        // Re-keyed by resetEpoch so manual navigation restarts the full interval,
+        // matching the JS SDK's resetTimer() on dot/arrow interaction.
+        .task(id: resetEpoch) { await runAutoAdvance(count: slides.count) }
+    }
+
+    private func runAutoAdvance(count: Int) async {
+        guard let interval = autoAdvance, interval > 0, count > 1 else { return }
+        let nanos = UInt64(interval * 1_000_000_000)
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: nanos)
+            if Task.isCancelled { break }
+            withAnimation { selection = (selection + 1) % count }
         }
     }
 
-    private var advanceTimer: Publishers.Autoconnect<Timer.TimerPublisher> {
-        // Always produce a publisher; when autoAdvance is nil use a far-future interval
-        // so it effectively never fires.
-        Timer.publish(every: autoAdvance ?? .greatestFiniteMagnitude, on: .main, in: .common)
-            .autoconnect()
+    /// Navigate to `index` with wraparound and restart the auto-advance interval.
+    private func go(to index: Int, count: Int) {
+        guard count > 0 else { return }
+        withAnimation { selection = ((index % count) + count) % count }
+        resetEpoch &+= 1
+    }
+
+    @ViewBuilder
+    private func arrowButton(_ systemName: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundColor(.white)
+                .frame(width: 32, height: 32)
+                .background(Circle().fill(Color.black.opacity(0.35)))
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private func dotsBar(count: Int) -> some View {
+        HStack(spacing: 6) {
+            ForEach(0..<count, id: \.self) { i in
+                Circle()
+                    .fill(i == selection ? Color.black.opacity(0.7) : Color.black.opacity(0.25))
+                    .frame(width: 8, height: 8)
+                    .onTapGesture { go(to: i, count: count) }
+            }
+        }
+        .padding(8)
     }
 
     // MARK: - Per-template rendering
@@ -106,7 +172,7 @@ public struct BannerView: View {
     @ViewBuilder
     private func gridSlide(_ slide: EmbedSlide, columns: Int) -> some View {
         let cells = slide.images ?? []
-        let layout = Array(repeating: GridItem(.flexible(), spacing: 8), count: max(1, columns))
+        let layout = Array(repeating: GridItem(.flexible(), spacing: 8), count: max(1, effectiveColumns(columns)))
         LazyVGrid(columns: layout, spacing: 8) {
             ForEach(cells.indices, id: \.self) { index in
                 let cell = cells[index]
@@ -115,6 +181,15 @@ public struct BannerView: View {
                 }
             }
         }
+    }
+
+    /// JS SDK collapses the grid to a single column under 640px. On iOS the compact
+    /// horizontal size class (phone portrait, slide-over) is the native equivalent.
+    private func effectiveColumns(_ columns: Int) -> Int {
+        #if os(iOS)
+        if hSizeClass == .compact { return 1 }
+        #endif
+        return columns
     }
 
     @ViewBuilder
